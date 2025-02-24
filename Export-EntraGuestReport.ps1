@@ -7,10 +7,10 @@ param(
     [switch]$PendingAcceptanceOnly
 )
 
-# Connect to Entra (Azure AD) with the required scope using the provided TenantId.
+# Connect to Entra ID (Azure AD) with the required scope using the provided TenantId.
 Connect-Entra -Scopes 'User.Read.All' -TenantId $TenantId
 
-# Retrieve all guest users from Entra (Azure AD).
+# Retrieve all guest users from Entra ID (Azure AD).
 $guests = Get-EntraUser -Filter "userType eq 'Guest'" -All |
     Select-Object DisplayName, UserPrincipalName, createdDateTime, signInActivity, externalUserState, DirSyncEnabled
 

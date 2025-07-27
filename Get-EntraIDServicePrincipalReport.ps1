@@ -1106,7 +1106,7 @@ $html += @"
         <p>👤 <strong>Delegated Permissions:</strong> User-context permissions limited by user's actual access</p>
         <br>
         <p>Found this tool helpful? Subscribe to my blog at <a href="https://www.matej.guru" target="_blank" style="color: #00abeb; text-decoration: none;">www.matej.guru</a>.</p>
-        <p style="margin-top: 10px; font-size: 0.8em; color: #95a5a6;">This script is provided "as is", without any warranty. Data provided by ip-api.com</p>
+        <p style="margin-top: 10px; font-size: 0.8em; color: #95a5a6;">This script is provided "as is", without any warranty.</p>
     </div>
 </body>
 </html>

@@ -46,6 +46,15 @@
 .EXAMPLE
     # List only SPs with at least 5 permissions
     .\Get-EntraIDServicePrincipalReport.ps1 -MinimumPermissions 5
+    
+.INSTALLATION
+    Install the required Microsoft Graph modules:
+
+    # Install only necessary modules
+    Install-Module -Name Microsoft.Graph.Authentication,Microsoft.Graph.Applications,Microsoft.Graph.Identity.SignIns,Microsoft.Graph.Identity.DirectoryManagement,Microsoft.Graph.Reports -Scope CurrentUser -AllowClobber
+
+    # Or install the full umbrella module
+    Install-Module -Name Microsoft.Graph -Scope CurrentUser -AllowClobber
 #>
 param(
     [string]$OutputPath = "EntraIDServicePrincipalReport.html",

@@ -921,17 +921,17 @@ $html += @"
 </html>
 "@
 
-# Save the simplified HTML report
+# Save the HTML report
 $html | Out-File -FilePath $OutputPath -Encoding UTF8
 
-Write-Host "Simplified report generated successfully: $OutputPath" -ForegroundColor Green
+Write-Host "Report generated successfully: $OutputPath" -ForegroundColor Green
 Write-Host "Opening report in default browser..." -ForegroundColor Green
 
 # Open the report in default browser
 Start-Process $OutputPath
 
 # Display summary statistics in console
-Write-Host "`n=== SIMPLIFIED REPORT SUMMARY ===" -ForegroundColor Cyan
+Write-Host "`n=== REPORT SUMMARY ===" -ForegroundColor Cyan
 Write-Host "Total Applications: $totalApps" -ForegroundColor White
 Write-Host "  - With App Registrations: $appsWithRegistrations" -ForegroundColor Green
 Write-Host "  - Service Principals Only: $servicePrincipalsOnly" -ForegroundColor Yellow
@@ -947,12 +947,6 @@ Write-Host "`nCredential Analysis:" -ForegroundColor White
 Write-Host "  - Apps with active credentials: $(($report | Where-Object { $_.HasActiveCredentials -eq $true }).Count)" -ForegroundColor Green
 Write-Host "  - Apps without credentials: $appsWithoutCredentials" -ForegroundColor DarkYellow
 Write-Host "  - Apps with expiring credentials (30 days): $(($report | Where-Object { $_.ExpiringCredentials -gt 0 }).Count)" -ForegroundColor Yellow
-
-# Simplified summary
-Write-Host "`n📊 Simplified Approach:" -ForegroundColor Green
-Write-Host "  - Removed unreliable activity detection" -ForegroundColor Green
-Write-Host "  - Focus on permissions, credentials, and risk assessment" -ForegroundColor Green
-Write-Host "  - Manual sign-in log review recommended for usage verification" -ForegroundColor Yellow
 
 # Performance summary
 if ($OnlyWithPermissions -or $MinimumPermissions -gt 0 -or $OnlyWithAppRegistrations -or $OnlyServicePrincipalsOnly) {

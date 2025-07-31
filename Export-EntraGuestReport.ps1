@@ -11,7 +11,7 @@ param(
 Connect-Entra -Scopes 'User.Read.All' -TenantId $TenantId
 
 # Retrieve all guest users from Entra ID (Azure AD).
-$guests = Get-EntraUser -Filter "userType eq 'Guest'" -All -Property DisplayName, UserPrincipalName, createdDateTime, signInActivity, externalUserState, DirSyncEnabled
+$guests = Get-EntraUser -Filter "userType eq 'Guest'" -Property DisplayName, UserPrincipalName, createdDateTime, signInActivity, externalUserState, DirSyncEnabled
 
 # Exclude guests that are DirSyncEnabled.
 $guests = $guests | Where-Object { $_.DirSyncEnabled -ne $true }

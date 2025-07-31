@@ -15,6 +15,10 @@ param(
     [string]$DestinationServer = $null,
     
     [Parameter(Mandatory=$false)]
+    [ValidateSet("Custom","Internet","Internal","Client","Partner")]
+    [string]$Usage = $null,
+    
+    [Parameter(Mandatory=$false)]
     [switch]$Force
 )
 
@@ -65,12 +69,15 @@ try {
         TransportRole = $sourceConnector.TransportRole
     }
     
-    # Handle Usage parameter - set default if null
-    if ($sourceConnector.Usage -and $sourceConnector.Usage -ne "") {
+    # Handle Usage parameter - use provided parameter, source value, or default
+    if ($Usage) {
+        $newConnectorParams.Usage = $Usage
+        Write-Host "Using specified Usage type: $Usage" -ForegroundColor Green
+    } elseif ($sourceConnector.Usage -and $sourceConnector.Usage -ne "") {
         $newConnectorParams.Usage = $sourceConnector.Usage
     } else {
-        $newConnectorParams.Usage = "Custom"  # Default to Custom if Usage is null
-        Write-Host "Warning: Source connector Usage was null, defaulting to 'Custom'" -ForegroundColor Yellow
+        $newConnectorParams.Usage = "Internet"  # Default to Internet instead of Custom
+        Write-Host "Warning: Source connector Usage was null, defaulting to 'Internet'" -ForegroundColor Yellow
     }
     
     # Add optional parameters if they exist in source connector (with null checks)
@@ -189,3 +196,9 @@ catch {
 
 # Skip confirmation prompt (auto-create):
 # .\CopyReceiveConnector.ps1 -SourceConnectorName "MyConnector" -NewConnectorName "MyConnector-Copy" -Force
+
+# Specify a different Usage type:
+# .\CopyReceiveConnector.ps1 -SourceConnectorName "MyConnector" -NewConnectorName "MyConnector-Copy" -Usage "Internet"
+
+# Combined example with cross-server copy and specific usage:
+# .\CopyReceiveConnector.ps1 -SourceConnectorName "MyConnector" -NewConnectorName "MyConnector-Copy" -SourceServer "MAIL01" -DestinationServer "MAIL02" -Usage "Client" -Force

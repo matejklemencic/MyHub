@@ -65,7 +65,6 @@ try {
         Bindings = $sourceConnector.Bindings
         RemoteIPRanges = $sourceConnector.RemoteIPRanges
         AuthMechanism = $sourceConnector.AuthMechanism
-        PermissionGroups = $sourceConnector.PermissionGroups
         TransportRole = $sourceConnector.TransportRole
     }
     
@@ -78,6 +77,14 @@ try {
     } else {
         $newConnectorParams.Usage = "Internet"  # Default to Internet instead of Custom
         Write-Host "Warning: Source connector Usage was null, defaulting to 'Internet'" -ForegroundColor Yellow
+    }
+    
+    # Handle PermissionGroups - only add if Usage is NOT "Custom"
+    if ($newConnectorParams.Usage -ne "Custom") {
+        $newConnectorParams.PermissionGroups = $sourceConnector.PermissionGroups
+        Write-Host "Adding PermissionGroups: $($sourceConnector.PermissionGroups -join ', ')" -ForegroundColor Green
+    } else {
+        Write-Host "Usage is 'Custom' - PermissionGroups will be omitted (not allowed with Custom usage)" -ForegroundColor Yellow
     }
     
     # Add optional parameters if they exist in source connector (with null checks)
@@ -129,15 +136,20 @@ try {
     Write-Host "  Bindings: $($newConnectorParams.Bindings -join ', ')" -ForegroundColor White
     Write-Host "  Remote IP Ranges: $($newConnectorParams.RemoteIPRanges -join ', ')" -ForegroundColor White
     Write-Host "  Authentication Mechanism: $($newConnectorParams.AuthMechanism -join ', ')" -ForegroundColor White
-    Write-Host "  Permission Groups: $($newConnectorParams.PermissionGroups -join ', ')" -ForegroundColor White
+    if ($newConnectorParams.ContainsKey('PermissionGroups')) {
+        Write-Host "  Permission Groups: $($newConnectorParams.PermissionGroups -join ', ')" -ForegroundColor White
+    } else {
+        Write-Host "  Permission Groups: (Not set - Custom usage)" -ForegroundColor Gray
+    }
     Write-Host "  Transport Role: $($newConnectorParams.TransportRole)" -ForegroundColor White
     Write-Host "  Usage: $($newConnectorParams.Usage)" -ForegroundColor White
     
     # Display optional parameters if they exist
-    if ($newConnectorParams.Count -gt 8) {  # More than the core 8 parameters
+    $coreParams = @('Name','Server','Bindings','RemoteIPRanges','AuthMechanism','PermissionGroups','TransportRole','Usage')
+    if ($newConnectorParams.Count -gt ($coreParams | Where-Object { $newConnectorParams.ContainsKey($_) }).Count) {
         Write-Host "`nADDITIONAL SETTINGS:" -ForegroundColor Yellow
         foreach ($param in $newConnectorParams.GetEnumerator()) {
-            if ($param.Key -notin @('Name','Server','Bindings','RemoteIPRanges','AuthMechanism','PermissionGroups','TransportRole','Usage')) {
+            if ($param.Key -notin $coreParams) {
                 Write-Host "  $($param.Key): $($param.Value)" -ForegroundColor White
             }
         }

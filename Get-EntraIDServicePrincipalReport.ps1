@@ -11,8 +11,8 @@
     Matej Klemencic (www.matej.guru)
 
 .NOTES
-    Version:        1.1
-    Last Modified:  2025-07-27
+    Version:        1.2
+    Last Modified:  2025-08-02
 
 .PARAMETER OutputPath
     Path to save the generated HTML report. Defaults to "EntraIDServicePrincipalReport.html".
@@ -123,13 +123,67 @@ function Import-GraphModuleSafely {
     }
 }
 
-# Function to calculate risk score (simplified - no activity-based scoring)
+# Function to get Service Principal owners
+function Get-ServicePrincipalOwners {
+    param([string]$ServicePrincipalId)
+    
+    try {
+        $owners = Get-MgServicePrincipalOwner -ServicePrincipalId $ServicePrincipalId -All -ErrorAction SilentlyContinue
+        $ownerDetails = @()
+        
+        foreach ($owner in $owners) {
+            try {
+                # Try to get user details first
+                $user = Get-MgUser -UserId $owner.Id -ErrorAction SilentlyContinue
+                if ($user) {
+                    $ownerDetails += @{
+                        Id = $owner.Id
+                        DisplayName = $user.DisplayName
+                        UserPrincipalName = $user.UserPrincipalName
+                        Type = "User"
+                    }
+                } else {
+                    # Try service principal if not a user
+                    $sp = Get-MgServicePrincipal -ServicePrincipalId $owner.Id -ErrorAction SilentlyContinue
+                    if ($sp) {
+                        $ownerDetails += @{
+                            Id = $owner.Id
+                            DisplayName = $sp.DisplayName
+                            UserPrincipalName = $sp.AppId
+                            Type = "ServicePrincipal"
+                        }
+                    } else {
+                        # Fallback for unknown owner type
+                        $ownerDetails += @{
+                            Id = $owner.Id
+                            DisplayName = "Unknown"
+                            UserPrincipalName = ""
+                            Type = "Unknown"
+                        }
+                    }
+                }
+            }
+            catch {
+                $ownerDetails += @{
+                    Id = $owner.Id
+                    DisplayName = "Unknown"
+                    UserPrincipalName = ""
+                    Type = "Unknown"
+                }
+            }
+        }
+        
+        return $ownerDetails
+    }
+    catch {
+        return @()
+    }
+}
 function Get-RiskScore {
     param(
         [array]$Permissions,
         [array]$DirectoryRoles,
         [string]$DisplayName,
-        [string]$PublisherName,
         [bool]$HasCredentials,
         [bool]$HasAppRegistration,
         $TotalUsers
@@ -196,12 +250,6 @@ function Get-RiskScore {
         $riskFactors += "Suspicious name contains: $($suspiciousKeywords -join ', ')"
     }
     
-    # Unknown publisher (only check once)
-    if ([string]::IsNullOrEmpty($PublisherName) -or $PublisherName -eq "Unknown") {
-        $score += 3
-        $riskFactors += "Unknown or missing publisher"
-    }
-    
     # High user count with sensitive permissions (only check once)
     if ($TotalUsers -eq "All Users" -and ($uniqueHighRiskPerms.Count -gt 0 -or $uniqueMediumRiskPerms.Count -gt 0)) {
         $score += 5
@@ -222,6 +270,18 @@ function Get-RiskScore {
     if (-not $HasAppRegistration) {
         $score += 2
         $riskFactors += "Service Principal without App Registration"
+    }
+    
+    # No assigned owners (check once)
+    if (-not $HasOwners) {
+        $score += 3
+        $riskFactors += "No assigned owners - lack of governance"
+    }
+    
+    # Assignment not required (open access risk)
+    if (-not $AssignmentRequired) {
+        $score += 4
+        $riskFactors += "Assignment not required - open access to all users"
     }
     
     return @{
@@ -250,10 +310,6 @@ function Get-ApplicationCredentials {
                 ExpiringCredentials = ($app.PasswordCredentials + $app.KeyCredentials | Where-Object { 
                     $_.EndDateTime -gt (Get-Date) -and $_.EndDateTime -lt (Get-Date).AddDays(30) 
                 }).Count
-                AppType = if ($app.Web.RedirectUris.Count -gt 0 -or $app.Spa.RedirectUris.Count -gt 0) { "Web/SPA App" } 
-                         elseif ($app.PublicClient.RedirectUris.Count -gt 0) { "Mobile/Desktop App" } 
-                         elseif ($app.RequiredResourceAccess.Count -gt 0) { "Daemon/Service App" } 
-                         else { "Unknown App Type" }
             }
         }
         else {
@@ -264,7 +320,6 @@ function Get-ApplicationCredentials {
                 ActiveSecrets = 0
                 ActiveCertificates = 0
                 ExpiringCredentials = 0
-                AppType = "Service Principal Only"
             }
         }
     }
@@ -276,7 +331,6 @@ function Get-ApplicationCredentials {
             ActiveSecrets = 0
             ActiveCertificates = 0
             ExpiringCredentials = 0
-            AppType = "Unknown"
         }
     }
 }
@@ -365,7 +419,7 @@ Write-Host "Gathering Enterprise Applications..." -ForegroundColor Green
 $servicePrincipals = Get-MgServicePrincipal -All -Property @(
     "Id", "AppId", "DisplayName", "AppOwnerOrganizationId", 
     "ServicePrincipalType", "AppRoles", "Oauth2PermissionScopes", "SignInAudience", 
-    "PublisherName", "Tags", "AppDisplayName", "CreatedDateTime"
+    "Tags", "AppDisplayName", "CreatedDateTime", "Owners", "AppRoleAssignmentRequired"
 ) | Where-Object { 
     $_.ServicePrincipalType -eq "Application" -and
     $_.AppOwnerOrganizationId -ne "f8cdef31-a31e-4b4a-93e4-5f571e91255a" -and
@@ -536,20 +590,29 @@ foreach ($sp in $servicePrincipals) {
         $totalUsers
     }
     
+    # Get Service Principal owners
+    $owners = Get-ServicePrincipalOwners -ServicePrincipalId $sp.Id
+    $hasOwners = $owners.Count -gt 0
+    $assignmentRequired = $sp.AppRoleAssignmentRequired
+    
     # Calculate risk score (simplified - no activity data)
-    $riskAssessment = Get-RiskScore -Permissions $permissions -DirectoryRoles ($permissionInfo.RoleAssignments | ForEach-Object { @{Permission = $_.DisplayName} }) -DisplayName $sp.DisplayName -PublisherName $sp.PublisherName -HasCredentials $credentials.HasActiveCredentials -HasAppRegistration $credentials.HasAppRegistration -TotalUsers $totalUsersAffected
+    $riskAssessment = Get-RiskScore -Permissions $permissions -DirectoryRoles ($permissionInfo.RoleAssignments | ForEach-Object { @{Permission = $_.DisplayName} }) -DisplayName $sp.DisplayName -HasCredentials $credentials.HasActiveCredentials -HasAppRegistration $credentials.HasAppRegistration -HasOwners $hasOwners -AssignmentRequired $assignmentRequired -TotalUsers $totalUsersAffected
     
     $report += [PSCustomObject]@{
         DisplayName = $sp.DisplayName
         AppId = $sp.AppId
         ServicePrincipalId = $sp.Id
-        PublisherName = $sp.PublisherName
+        AppOwnerOrganizationId = $sp.AppOwnerOrganizationId
         CreatedDate = $sp.CreatedDateTime
         
         # App Registration info
         HasAppRegistration = $credentials.HasAppRegistration
         AppRegistrationId = $credentials.AppRegistrationId
-        AppType = $credentials.AppType
+        
+        # Ownership info
+        Owners = $owners
+        HasOwners = $hasOwners
+        AssignmentRequired = $assignmentRequired
         
         # Permissions
         TotalPermissions = $permissions.Count
@@ -618,6 +681,12 @@ $tenantInfo = Get-MgOrganization | Select-Object -First 1
 $tenantName = $tenantInfo.DisplayName
 $tenantId = $tenantInfo.Id
 
+# Calculate additional statistics for internal vs external apps
+$internalApps = ($report | Where-Object { $_.AppOwnerOrganizationId -eq $tenantId }).Count
+$externalApps = ($report | Where-Object { $_.AppOwnerOrganizationId -ne $tenantId }).Count
+$appsWithoutOwners = ($report | Where-Object { $_.HasOwners -eq $false }).Count
+$appsWithOpenAccess = ($report | Where-Object { $_.AssignmentRequired -eq $false }).Count
+
 # Generate simplified HTML report
 $html = @"
 <!DOCTYPE html>
@@ -647,6 +716,12 @@ $html = @"
         .risk-low { background: #c6f6d5 !important; color: #38a169; }
         .has-app-reg { color: #38a169; font-weight: bold; }
         .sp-only { color: #e53e3e; font-weight: bold; }
+        .internal-app { color: #2b6cb0; font-weight: bold; }
+        .external-app { color: #d69e2e; font-weight: bold; }
+        .assignment-required { color: #38a169; font-weight: bold; }
+        .assignment-not-required { color: #e53e3e; font-weight: bold; }
+        .has-owners { color: #38a169; font-weight: bold; }
+        .no-owners { color: #e53e3e; font-weight: bold; }
         .permission-list { max-height: 200px; overflow-y: auto; font-size: 11px; }
         .permission-item { margin: 2px 0; padding: 2px 5px; background: #e2e8f0; border-radius: 3px; display: inline-block; margin-right: 5px; }
         .app-permission { background: #fed7d7; color: #c53030; font-weight: bold; }
@@ -668,6 +743,16 @@ $html = @"
             <h3>📱 Total Applications</h3>
             <div class="number">$totalApps</div>
             <div class="subtitle">Enterprise Applications analyzed</div>
+        </div>
+        <div class="summary-card">
+            <h3>🏢 Internal Apps</h3>
+            <div class="number">$internalApps</div>
+            <div class="subtitle">Apps owned by your organization</div>
+        </div>
+        <div class="summary-card">
+            <h3>🌐 External Apps</h3>
+            <div class="number">$externalApps</div>
+            <div class="subtitle">Third-party or external applications</div>
         </div>
         <div class="summary-card">
             <h3>📋 With App Registrations</h3>
@@ -704,6 +789,16 @@ $html = @"
             <div class="number">$appsWithoutCredentials</div>
             <div class="subtitle">Apps with registrations but no active credentials</div>
         </div>
+        <div class="summary-card">
+            <h3>👤 Without Owners</h3>
+            <div class="number">$appsWithoutOwners</div>
+            <div class="subtitle">Apps with no assigned owners (governance risk)</div>
+        </div>
+        <div class="summary-card">
+            <h3>🌍 Open Access</h3>
+            <div class="number">$appsWithOpenAccess</div>
+            <div class="subtitle">Apps with "Assignment Required" = No</div>
+        </div>
     </div>
 
     <div class="controls">
@@ -716,13 +811,15 @@ $html = @"
             <option value="Medium">Medium Risk</option>
             <option value="Low">Low Risk</option>
         </select>
-        <select id="appTypeFilter" onchange="filterTable()">
-            <option value="">All App Types</option>
-            <option value="Web/SPA App">Web/SPA Apps</option>
-            <option value="Mobile/Desktop App">Mobile/Desktop Apps</option>
-            <option value="Daemon/Service App">Daemon/Service Apps</option>
-            <option value="Service Principal Only">Service Principal Only</option>
-            <option value="Unknown App Type">Unknown App Type</option>
+        <select id="assignmentFilter" onchange="filterTable()">
+            <option value="">All Assignment Settings</option>
+            <option value="required">Assignment Required (Restricted)</option>
+            <option value="not-required">Assignment Not Required (Open Access)</option>
+        </select>
+        <select id="ownershipFilter" onchange="filterTable()">
+            <option value="">All App Ownership</option>
+            <option value="internal">Internal Apps (Your Org)</option>
+            <option value="external">External Apps (Third-party)</option>
         </select>
         <select id="permissionTypeFilter" onchange="filterTable()">
             <option value="">All Permission Types</option>
@@ -731,8 +828,8 @@ $html = @"
             <option value="both">Apps with Both Types</option>
             <option value="none">Apps with No Permissions</option>
         </select>
-        <button onclick="sortTable(4, 'number')">Sort by Risk Score</button>
-        <button onclick="sortTable(5, 'number')">Sort by Total Permissions</button>
+        <button onclick="sortTable(6, 'number')">Sort by Risk Score</button>
+        <button onclick="sortTable(8, 'number')">Sort by Total Permissions</button>
         <button onclick="clearFilters()">Clear All Filters</button>
     </div>
 
@@ -741,14 +838,15 @@ $html = @"
             <tr>
                 <th onclick="sortTable(0, 'string')">Application Name</th>
                 <th onclick="sortTable(1, 'string')">App ID</th>
-                <th onclick="sortTable(2, 'string')">App Type</th>
+                <th onclick="sortTable(2, 'string')">App Ownership</th>
                 <th onclick="sortTable(3, 'string')">Has App Registration</th>
-                <th onclick="sortTable(4, 'number')">Risk Score</th>
-                <th onclick="sortTable(5, 'string')">Risk Level</th>
-                <th onclick="sortTable(6, 'number')">Total Permissions</th>
+                <th onclick="sortTable(4, 'string')">Assignment Required</th>
+                <th onclick="sortTable(5, 'string')">Owners</th>
+                <th onclick="sortTable(6, 'number')">Risk Score</th>
+                <th onclick="sortTable(7, 'string')">Risk Level</th>
+                <th onclick="sortTable(8, 'number')">Total Permissions</th>
                 <th>Permissions Detail</th>
-                <th onclick="sortTable(8, 'string')">Publisher</th>
-                <th onclick="sortTable(9, 'string')">Active Credentials</th>
+                <th onclick="sortTable(10, 'string')">Active Credentials</th>
                 <th>Risk Factors</th>
             </tr>
         </thead>
@@ -762,6 +860,30 @@ foreach ($app in $sortedReport) {
     $riskClass = "risk-" + $app.RiskLevel.ToLower()
     $appRegClass = if ($app.HasAppRegistration) { "has-app-reg" } else { "sp-only" }
     $appRegText = if ($app.HasAppRegistration) { "✅ Yes" } else { "❌ No" }
+    
+    # Determine app ownership
+    $isInternal = $app.AppOwnerOrganizationId -eq $tenantId
+    $ownershipText = if ($isInternal) { "🏢 Internal" } else { "🌐 External" }
+    $ownershipClass = if ($isInternal) { "internal-app" } else { "external-app" }
+    
+    # Determine assignment requirement
+    $assignmentRequiredText = if ($app.AssignmentRequired) { "✅ Yes" } else { "❌ No" }
+    $assignmentRequiredClass = if ($app.AssignmentRequired) { "assignment-required" } else { "assignment-not-required" }
+    
+    # Format owners
+    $ownersText = if ($app.HasOwners) {
+        $ownersList = ($app.Owners | ForEach-Object { 
+            if ($_.Type -eq "User") { 
+                "$($_.DisplayName) ($($_.UserPrincipalName))" 
+            } else { 
+                "$($_.DisplayName) [$($_.Type)]" 
+            }
+        }) -join "<br>"
+        "✅ $($app.Owners.Count) owner(s)<br><small style='color: #666; font-size: 9px;'>$ownersList</small>"
+    } else {
+        "❌ No owners assigned"
+    }
+    $ownersClass = if ($app.HasOwners) { "has-owners" } else { "no-owners" }
     
     $credentialsInfo = ""
     $credentialStatus = ""
@@ -799,11 +921,13 @@ foreach ($app in $sortedReport) {
     $permissionSummary = "App: $($app.ApplicationPermissions), Delegated: $($app.DelegatedPermissions), Roles: $($app.DirectoryRoles)"
     
     $html += @"
-            <tr class="$riskClass" data-risk="$($app.RiskLevel)" data-apptype="$($app.HasAppRegistration)" data-apppermcount="$($app.ApplicationPermissions)" data-delegatedpermcount="$($app.DelegatedPermissions)" data-credentials="$($app.HasActiveCredentials)">
+            <tr class="$riskClass" data-risk="$($app.RiskLevel)" data-apptype="$($app.HasAppRegistration)" data-apppermcount="$($app.ApplicationPermissions)" data-delegatedpermcount="$($app.DelegatedPermissions)" data-credentials="$($app.HasActiveCredentials)" data-ownership="$(if ($isInternal) { 'internal' } else { 'external' })" data-assignment="$(if ($app.AssignmentRequired) { 'required' } else { 'not-required' })">
                 <td><strong>$($app.DisplayName)</strong></td>
                 <td><code style='font-size: 10px;'>$($app.AppId)</code></td>
-                <td>$($app.AppType)</td>
+                <td class="$ownershipClass">$ownershipText<br><small style='color: #666; font-size: 9px;'>$($app.AppOwnerOrganizationId)</small></td>
                 <td class="$appRegClass">$appRegText</td>
+                <td class="$assignmentRequiredClass">$assignmentRequiredText</td>
+                <td class="$ownersClass" style='font-size: 11px;'>$ownersText</td>
                 <td><strong>$($app.RiskScore)</strong></td>
                 <td><span class="$riskClass">$($app.RiskLevel)</span></td>
                 <td><strong>$($app.TotalPermissions)</strong><br><small style='color: #666;'>$permissionSummary</small></td>
@@ -813,7 +937,6 @@ foreach ($app in $sortedReport) {
                         <div class="permission-list">$permissionDetails</div>
                     </details>
                 </td>
-                <td>$(if ($app.PublisherName) { $app.PublisherName } else { "<em>Unknown</em>" })</td>
                 <td style='font-size: 11px;'>
                     <strong>$credentialStatus</strong><br>
                     $credentialsInfo
@@ -836,7 +959,8 @@ $html += @"
         function filterTable() {
             const searchInput = document.getElementById('searchInput').value.toLowerCase();
             const riskFilter = document.getElementById('riskFilter').value;
-            const appTypeFilter = document.getElementById('appTypeFilter').value;
+            const assignmentFilter = document.getElementById('assignmentFilter').value;
+            const ownershipFilter = document.getElementById('ownershipFilter').value;
             const permissionTypeFilter = document.getElementById('permissionTypeFilter').value;
             const table = document.getElementById('reportTable');
             const rows = table.querySelectorAll('tbody tr');
@@ -844,7 +968,8 @@ $html += @"
             rows.forEach(row => {
                 const appName = row.cells[0].textContent.toLowerCase();
                 const riskLevel = row.getAttribute('data-risk');
-                const appType = row.cells[2].textContent.trim(); // App Type column
+                const ownership = row.getAttribute('data-ownership');
+                const assignment = row.getAttribute('data-assignment');
                 const applicationPerms = parseInt(row.getAttribute('data-apppermcount')) || 0;
                 const delegatedPerms = parseInt(row.getAttribute('data-delegatedpermcount')) || 0;
                 
@@ -852,7 +977,8 @@ $html += @"
                 
                 if (searchInput && !appName.includes(searchInput)) show = false;
                 if (riskFilter && riskLevel !== riskFilter) show = false;
-                if (appTypeFilter && appType !== appTypeFilter) show = false;
+                if (ownershipFilter && ownership !== ownershipFilter) show = false;
+                if (assignmentFilter && assignment !== assignmentFilter) show = false;
                 
                 // Permission type filtering
                 if (permissionTypeFilter) {
@@ -900,7 +1026,8 @@ $html += @"
         function clearFilters() {
             document.getElementById('searchInput').value = '';
             document.getElementById('riskFilter').value = '';
-            document.getElementById('appTypeFilter').value = '';
+            document.getElementById('assignmentFilter').value = '';
+            document.getElementById('ownershipFilter').value = '';
             document.getElementById('permissionTypeFilter').value = '';
             filterTable();
         }
@@ -908,11 +1035,17 @@ $html += @"
 
     <div class="footer">
         <p><strong>Legend:</strong></p>
-        <p>✅ <strong>With App Registration:</strong> Custom/third-party apps with full App Registration objects</p>
-        <p>❌ <strong>Service Principal Only:</strong> Pre-authorized apps, gallery apps, or system-created principals without App Registrations</p>
+        <p>🏢 <strong>Internal Apps:</strong> Applications owned by your organization (same tenant)</p>
+        <p>🌐 <strong>External Apps:</strong> Third-party applications integrated into your environment</p>
+        <p>✅ <strong>With App Registration:</strong> Apps that have corresponding App Registration objects in your tenant</p>
+        <p>❌ <strong>Service Principal Only:</strong> Apps with only Service Principal objects (gallery apps, legacy apps, etc.)</p>
         <p>🔧 <strong>Application Permissions:</strong> High-risk daemon permissions that run with app identity</p>
         <p>👤 <strong>Delegated Permissions:</strong> User-context permissions limited by user's actual access</p>
         <p>🔑 <strong>Active Credentials:</strong> Applications with valid secrets or certificates</p>
+        <p>✅ <strong>Assignment Required = Yes:</strong> Only assigned users/groups can access (recommended for security)</p>
+        <p>❌ <strong>Assignment Required = No:</strong> All users in tenant can potentially access (higher risk)</p>
+        <p>✅ <strong>Has Owners:</strong> Application has assigned owners for governance</p>
+        <p>❌ <strong>No Owners:</strong> Application lacks assigned owners (governance risk)</p>
         <br>
         <p>Found this tool helpful? Subscribe to my blog at <a href="https://www.matej.guru" target="_blank" style="color: #00abeb; text-decoration: none;">www.matej.guru</a>.</p>
         <p style="margin-top: 10px; font-size: 0.8em; color: #95a5a6;">This script is provided "as is", without any warranty.</p>
@@ -933,6 +1066,8 @@ Start-Process $OutputPath
 # Display summary statistics in console
 Write-Host "`n=== REPORT SUMMARY ===" -ForegroundColor Cyan
 Write-Host "Total Applications: $totalApps" -ForegroundColor White
+Write-Host "  - Internal Apps (Your Org): $internalApps" -ForegroundColor Blue
+Write-Host "  - External Apps (Third-party): $externalApps" -ForegroundColor DarkYellow
 Write-Host "  - With App Registrations: $appsWithRegistrations" -ForegroundColor Green
 Write-Host "  - Service Principals Only: $servicePrincipalsOnly" -ForegroundColor Yellow
 Write-Host "`nPermission Analysis:" -ForegroundColor White
@@ -943,6 +1078,9 @@ Write-Host "  - Critical Risk: $criticalRiskApps" -ForegroundColor Red
 Write-Host "  - High Risk: $highRiskApps" -ForegroundColor DarkYellow
 Write-Host "  - Medium Risk: $(($report | Where-Object { $_.RiskLevel -eq "Medium" }).Count)" -ForegroundColor Yellow
 Write-Host "  - Low Risk: $(($report | Where-Object { $_.RiskLevel -eq "Low" }).Count)" -ForegroundColor Green
+Write-Host "`nGovernance Analysis:" -ForegroundColor White
+Write-Host "  - Apps without owners: $appsWithoutOwners" -ForegroundColor Red
+Write-Host "  - Apps with open access (Assignment Required = No): $appsWithOpenAccess" -ForegroundColor DarkYellow
 Write-Host "`nCredential Analysis:" -ForegroundColor White
 Write-Host "  - Apps with active credentials: $(($report | Where-Object { $_.HasActiveCredentials -eq $true }).Count)" -ForegroundColor Green
 Write-Host "  - Apps without credentials: $appsWithoutCredentials" -ForegroundColor DarkYellow

@@ -29,7 +29,7 @@
 .PARAMETER OnlyWithAppRegistrations
     Include only applications that have corresponding App Registration objects in the tenant.
 
-.PARAMETER OnlyServicePrincipalsOnly
+.PARAMETER OnlyServicePrincipals
     Include only service principals without an App Registration (e.g., gallery or legacy apps).
 
 .PARAMETER Verbose
@@ -62,7 +62,7 @@ param(
     [int]$MinimumPermissions = 0,
     [string]$RiskConfigPath = $null,
     [switch]$OnlyWithAppRegistrations,
-    [switch]$OnlyServicePrincipalsOnly,
+    [switch]$OnlyServicePrincipals,
     [switch]$Verbose
 )
 
@@ -310,7 +310,8 @@ function Get-RiskScore {
         [bool]$HasAppRegistrationOwners,
         [bool]$HasAnyOwners,
         [bool]$AssignmentRequired,
-        $TotalUsers
+        $TotalUsers,
+        [bool]$IsInternalApp
     )
     
     $score = 0
@@ -404,8 +405,8 @@ function Get-RiskScore {
         $riskFactors += "No App Registration owners (only Service Principal owners)"
     }
     
-    # Ownership gap detection
-    if ($HasAppRegistration -and ($HasServicePrincipalOwners -ne $HasAppRegistrationOwners)) {
+    # Ownership gap detection (only for internal applications)
+    if ($HasAppRegistration -and $isInternalApp -and ($HasServicePrincipalOwners -ne $HasAppRegistrationOwners)) {
         $score += 2
         $riskFactors += "Ownership gap - owners differ between Service Principal and App Registration"
     }
@@ -564,7 +565,7 @@ $servicePrincipals = Get-MgServicePrincipal -All -Property @(
         "09abbdfd-ed23-44ee-a2d9-a627aa1c90f3", # Microsoft Graph PowerShell
         "1b730954-1685-4b74-9bfd-dac224a7b894", # Azure Active Directory PowerShell
         "1950a258-227b-4e31-a9cf-717495945fc2", # Microsoft Azure PowerShell
-        "797f4846-ba00-4fd7-ba43-dac1f8f63013"  # Windows Azure Service Management API
+        "797f4846-ba00-4fd7-ba43-dac1f8f63013" # Windows Azure Service Management API
     ) -and
     ($_.Tags -contains "WindowsAzureActiveDirectoryIntegratedApp" -or
      $_.AppOwnerOrganizationId -eq (Get-MgContext).TenantId -or
@@ -574,7 +575,7 @@ $servicePrincipals = Get-MgServicePrincipal -All -Property @(
 Write-Host "Found $($servicePrincipals.Count) Enterprise Applications" -ForegroundColor Green
 
 # PRE-FILTERING PHASE: Apply quick filters first for performance optimization
-if ($OnlyWithPermissions -or $MinimumPermissions -gt 0 -or $OnlyWithAppRegistrations -or $OnlyServicePrincipalsOnly) {
+if ($OnlyWithPermissions -or $MinimumPermissions -gt 0 -or $OnlyWithAppRegistrations -or $OnlyServicePrincipals) {
     Write-Host "`nPre-filtering applications for performance optimization..." -ForegroundColor Cyan
     
     $filteredServicePrincipals = @()
@@ -589,13 +590,13 @@ if ($OnlyWithPermissions -or $MinimumPermissions -gt 0 -or $OnlyWithAppRegistrat
         $shouldInclude = $true
         
         # Check App Registration filter first (fastest check)
-        if ($OnlyWithAppRegistrations -or $OnlyServicePrincipalsOnly) {
+        if ($OnlyWithAppRegistrations -or $OnlyServicePrincipals) {
             $credentials = Get-ApplicationCredentials -AppId $sp.AppId
             
             if ($OnlyWithAppRegistrations -and -not $credentials.HasAppRegistration) {
                 $shouldInclude = $false
             }
-            elseif ($OnlyServicePrincipalsOnly -and $credentials.HasAppRegistration) {
+            elseif ($OnlyServicePrincipals -and $credentials.HasAppRegistration) {
                 $shouldInclude = $false
             }
         }
@@ -727,8 +728,11 @@ foreach ($sp in $servicePrincipals) {
     $hasOwners = $ownerInfo.HasAnyOwners
     $assignmentRequired = $sp.AppRoleAssignmentRequired
     
+    # Calculate if it's an internal app
+    $isInternalApp = $sp.AppOwnerOrganizationId -eq (Get-MgContext).TenantId
+
     # Calculate risk score with enhanced ownership parameters
-    $riskAssessment = Get-RiskScore -Permissions $permissions -DirectoryRoles ($permissionInfo.RoleAssignments | ForEach-Object { @{Permission = $_.DisplayName} }) -DisplayName $sp.DisplayName -HasCredentials $credentials.HasActiveCredentials -HasAppRegistration $credentials.HasAppRegistration -HasServicePrincipalOwners $ownerInfo.HasServicePrincipalOwners -HasAppRegistrationOwners $ownerInfo.HasAppRegistrationOwners -HasAnyOwners $ownerInfo.HasAnyOwners -AssignmentRequired $assignmentRequired -TotalUsers $totalUsersAffected
+    $riskAssessment = Get-RiskScore -Permissions $permissions -DirectoryRoles ($permissionInfo.RoleAssignments | ForEach-Object { @{Permission = $_.DisplayName} }) -DisplayName $sp.DisplayName -HasCredentials $credentials.HasActiveCredentials -HasAppRegistration $credentials.HasAppRegistration -HasServicePrincipalOwners $ownerInfo.HasServicePrincipalOwners -HasAppRegistrationOwners $ownerInfo.HasAppRegistrationOwners -HasAnyOwners $ownerInfo.HasAnyOwners -AssignmentRequired $assignmentRequired -TotalUsers $totalUsersAffected -IsInternalApp $isInternalApp
     
     $report += [PSCustomObject]@{
         DisplayName = $sp.DisplayName
@@ -791,7 +795,7 @@ if ($OnlyWithAppRegistrations) {
     $report = $report | Where-Object { $_.HasAppRegistration -eq $true }
 }
 
-if ($OnlyServicePrincipalsOnly) {
+if ($OnlyServicePrincipals) {
     $report = $report | Where-Object { $_.HasAppRegistration -eq $false }
 }
 
@@ -1024,8 +1028,9 @@ foreach ($app in $sortedReport) {
         # Build owner display
         $ownerDisplay = "✅ Total: $($app.Owners.Count) owner(s)<br>"
         
-        # Show breakdown if there's a difference
-        if ($app.OwnershipGap -or ($spOwnerCount -ne $appRegOwnerCount)) {
+        # Show breakdown if there's a difference (only for internal apps)
+        $isInternalApp = $app.AppOwnerOrganizationId -eq $tenantId
+        if (($app.OwnershipGap -or ($spOwnerCount -ne $appRegOwnerCount)) -and $isInternalApp -and $app.HasAppRegistration) {
             $ownerDisplay += "<small style='color: #e53e3e;'>⚠️ Ownership Gap Detected</small><br>"
             $ownerDisplay += "<small style='color: #666;'>SP: $spOwnerCount | App Reg: $appRegOwnerCount</small><br>"
         }
@@ -1051,8 +1056,12 @@ foreach ($app in $sortedReport) {
         "❌ No owners assigned"
     }
     
+    # Determine ownership CSS class
+    $isInternalApp = $app.AppOwnerOrganizationId -eq $tenantId
+    $hasLegitimateOwnershipGap = $app.OwnershipGap -and $isInternalApp -and $app.HasAppRegistration
+
     $ownersClass = if ($app.HasOwners) { 
-        if ($app.OwnershipGap) { "ownership-gap" } else { "has-owners" }
+        if ($hasLegitimateOwnershipGap) { "ownership-gap" } else { "has-owners" }
     } else { 
         "no-owners" 
     }
@@ -1261,7 +1270,7 @@ Write-Host "  - Apps without credentials: $appsWithoutCredentials" -ForegroundCo
 Write-Host "  - Apps with expiring credentials (30 days): $(($report | Where-Object { $_.ExpiringCredentials -gt 0 }).Count)" -ForegroundColor Yellow
 
 # Performance summary
-if ($OnlyWithPermissions -or $MinimumPermissions -gt 0 -or $OnlyWithAppRegistrations -or $OnlyServicePrincipalsOnly) {
+if ($OnlyWithPermissions -or $MinimumPermissions -gt 0 -or $OnlyWithAppRegistrations -or $OnlyServicePrincipals) {
     Write-Host "`n⚡ Performance Optimization:" -ForegroundColor Green
     Write-Host "  - Pre-filtering optimization was applied" -ForegroundColor Green
     Write-Host "  - Analysis was only performed on filtered applications" -ForegroundColor Green

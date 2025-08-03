@@ -13,7 +13,6 @@
 .NOTES
     Version:        1.3
     Last Modified:  2025-08-03
-    Changes:        Added comprehensive ownership checking for both Service Principals and App Registrations
 
 .PARAMETER OutputPath
     Path to save the generated HTML report. Defaults to "EntraIDServicePrincipalReport.html".
@@ -74,20 +73,29 @@ $riskConfig = @{
         'Group.ReadWrite.All', 'Application.ReadWrite.All', 'RoleManagement.ReadWrite.Directory',
         'Policy.ReadWrite.All', 'Sites.FullControl.All', 'Files.ReadWrite.All',
         'Mail.ReadWrite', 'Calendars.ReadWrite', 'Contacts.ReadWrite',
-        'DeviceManagementConfiguration.ReadWrite.All', 'DeviceManagementApps.ReadWrite.All'
+        'DeviceManagementConfiguration.ReadWrite.All', 'DeviceManagementApps.ReadWrite.All',
+        'Policy.ReadWrite.ConditionalAccess', 'User.DeleteRestore.All', 'User.EnableDisableAccount.All',
+        'PrivilegedAccess.ReadWrite.AzureADGroup', 'PrivilegedAssignmentSchedule.ReadWrite.AzureADGroup',
+        'RoleAssignmentSchedule.ReadWrite.Directory', 'UserAuthenticationMethod.ReadWrite.All', 'AppRoleAssignment.ReadWrite.All',
+        'Domain.ReadWrite.All', 'RoleManagementPolicy.ReadWrite.AzureADGroup', 'RoleManagementPolicy.ReadWrite.Directory',
+        'GroupMember.ReadWrite.All', 'DeviceManagementRBAC.ReadWrite.All', 'EntitlementManagement.ReadWrite.All',
+        'Organization.ReadWrite.All', 'Policy.ReadWrite.AuthenticationMethod', 'Policy.ReadWrite.PermissionGrant'
     )
     MediumRiskPermissions = @(
         'Directory.Read.All', 'User.Read.All', 'Group.Read.All',
         'Application.Read.All', 'Sites.Read.All', 'Files.Read.All',
-        'Mail.Read', 'Calendars.Read', 'Contacts.Read'
+        'Mail.Read', 'Mail.ReadWrite', 'Mail.Send', 'Calendars.ReadWrite',
+        'Contacts.ReadWrite', 'User.ReadBasic.All'
     )
     HighRiskDirectoryRoles = @(
         'Global Administrator', 'Privileged Role Administrator', 'Security Administrator',
         'Application Administrator', 'Cloud Application Administrator', 'User Administrator',
-        'Exchange Administrator', 'SharePoint Administrator', 'Conditional Access Administrator'
+        'Exchange Administrator', 'SharePoint Administrator', 'Intune Administrator', 'Conditional Access Administrator',
+        'Privileged Authentication Administrator', 'Hybrid Identity Administrator', 'Authentication Administrator'
     )
     SuspiciousKeywords = @(
-        'test', 'demo', 'temp', 'old', 'backup', 'legacy', 'dev', 'staging'
+        'test', 'demo', 'temp', 'old', 'backup', 'legacy', 'dev', 'staging', 'admin', 'service', 'support', 'update', 'security', 'patch',
+        'token', 'authentication', 'auth', 'credential', 'sync', 'connector', 'monitor', 'gateway', 'agent', 'portal', 'framework'
     )
 }
 
@@ -824,7 +832,7 @@ $html = @"
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Microsoft Entra ID Service Principals Report</title>
+    <title>Microsoft Entra ID Service Principals (Enterprise Applications) Report</title>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; background-color: #f8f9fa; }
         .header { background-color: #00abeb; color: #ffffff; padding: 30px; border-radius: 10px; margin-bottom: 20px; }
@@ -846,8 +854,8 @@ $html = @"
         .risk-high { background: #feebc8 !important; color: #dd6b20; }
         .risk-medium { background: #fefcbf !important; color: #d69e2e; }
         .risk-low { background: #c6f6d5 !important; color: #38a169; }
-        .has-app-reg { color: #38a169; }
-        .sp-only { color: #e53e3e; }
+        .has-app-reg { color: #666; }
+        .sp-only { color: #666; }
         .internal-app { color: #2b6cb0; }
         .external-app { color: #d69e2e; }
         .assignment-required { color: #38a169; }
@@ -855,17 +863,17 @@ $html = @"
         .has-owners { color: #38a169; }
         .no-owners { color: #e53e3e; }
         .ownership-gap { color: #d69e2e; }
-        .permission-list { max-height: 200px; overflow-y: auto; font-size: 11px; }
-        .permission-item { margin: 2px 0; padding: 2px 5px; background: #e2e8f0; border-radius: 3px; display: inline-block; margin-right: 5px; }
+        .permission-list { max-height: none; overflow-y: visible; font-size: 11px; }
+        .permission-item { margin: 2px 0; padding: 2px 5px; border-radius: 3px; display: inline-block; margin-right: 5px; }
         .app-permission { background: #fed7d7; color: #c53030; }
-        .delegated-permission { background: #c6f6d5; color: #38a169; }
-        .directory-role { background: #feebc8; border-left: 3px solid #dd6b20; color: #dd6b20; }
+        .delegated-permission { color: #666 ; }
+        .directory-role { border-left: 3px solid #dd6b20; color: #dd6b20; }
         .footer { margin-top: 30px; padding: 20px; text-align: center; color: #718096; background: white; border-radius: 10px; }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>Microsoft Entra ID Service Principals Report</h1>
+        <h1>Microsoft Entra ID Service Principals (Enterprise Applications) Report</h1>
         <p><strong>Tenant:</strong> $tenantName</p>
         <p><strong>Tenant ID:</strong> $tenantId</p>
         <p><strong>Generated:</strong> $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")</p>
@@ -997,7 +1005,7 @@ $sortedReport = $report | Sort-Object @{Expression="RiskScore"; Descending=$true
 foreach ($app in $sortedReport) {
     $riskClass = "risk-" + $app.RiskLevel.ToLower()
     $appRegClass = if ($app.HasAppRegistration) { "has-app-reg" } else { "sp-only" }
-    $appRegText = if ($app.HasAppRegistration) { "Yes" } else { "No" }
+    $appRegText = if ($app.HasAppRegistration) { "✅ Yes" } else { "❌ No" }
     
     # Determine app ownership
     $isInternal = $app.AppOwnerOrganizationId -eq $tenantId
@@ -1058,7 +1066,7 @@ foreach ($app in $sortedReport) {
         }
         $credentialStatus = if ($app.HasActiveCredentials) { "✅ Active" } else { "❌ None" }
     } else {
-        $credentialsInfo = "N/A (Service Principal Only)"
+        $credentialsInfo = "(Service Principal Only)"
         $credentialStatus = "N/A"
     }
     
@@ -1086,7 +1094,7 @@ foreach ($app in $sortedReport) {
     
     $html += @"
             <tr class="$riskClass" data-risk="$($app.RiskLevel)" data-apptype="$($app.HasAppRegistration)" data-apppermcount="$($app.ApplicationPermissions)" data-delegatedpermcount="$($app.DelegatedPermissions)" data-credentials="$($app.HasActiveCredentials)" data-ownership="$(if ($isInternal) { 'internal' } else { 'external' })" data-assignment="$(if ($app.AssignmentRequired) { 'required' } else { 'not-required' })">
-                <td><strong>$($app.DisplayName)</strong></td>
+                <td>$($app.DisplayName)</td>
                 <td><code style='font-size: 10px;'>$($app.AppId)</code></td>
                 <td class="$ownershipClass">$ownershipText<br><small style='color: #666; font-size: 9px;'>$($app.AppOwnerOrganizationId)</small></td>
                 <td class="$appRegClass">$appRegText</td>
@@ -1206,10 +1214,10 @@ $html += @"
         <p>🔧 <strong>Application Permissions:</strong> High-risk permissions that run with app identity</p>
         <p>👤 <strong>Delegated Permissions:</strong> User-context permissions limited by user's actual access</p>
         <p>🔑 <strong>Active Credentials:</strong> Applications with valid secrets or certificates</p>
-        <p>✅ <strong>Assignment Required = Yes:</strong> Only assigned users/groups can access (recommended for security)</p>
+        <p>✅ <strong>Assignment Required = Yes:</strong> Only assigned users/groups can access (recommended)</p>
         <p>❌ <strong>Assignment Required = No:</strong> All users in tenant can potentially access (higher risk)</p>
-        <p>✅ <strong>Has Owners:</strong> Application has assigned owners for governance</p>
-        <p>❌ <strong>No Owners:</strong> Application lacks assigned owners (governance risk)</p>
+        <p>✅ <strong>Has Owners:</strong> Application has assigned owners</p>
+        <p>❌ <strong>No Owners:</strong> Application lacks assigned owners</p>
         <p>⚠️ <strong>Ownership Gap:</strong> Owners exist on Service Principal or App Registration but not both</p>
         <p><strong>Owner Indicators:</strong> [SP] = Service Principal owner, [App] = App Registration owner, [Both] = Owner on both</p>
         <br>

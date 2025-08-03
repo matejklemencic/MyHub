@@ -5,14 +5,15 @@
 .DESCRIPTION
     This script connects to Microsoft Graph, retrieves service principals matching the Enterprise Applications filter, analyzes permissions and credentials.
     It calculates a risk score based on configurable rules and produces an optimized, filterable HTML report.
-    Focuses on reliable data without attempting complex activity detection.
+    Includes enhanced ownership checking for both Service Principals and App Registrations.
 
 .AUTHOR
     Matej Klemencic (www.matej.guru)
 
 .NOTES
-    Version:        1.2
-    Last Modified:  2025-08-02
+    Version:        1.3
+    Last Modified:  2025-08-03
+    Changes:        Added comprehensive ownership checking for both Service Principals and App Registrations
 
 .PARAMETER OutputPath
     Path to save the generated HTML report. Defaults to "EntraIDServicePrincipalReport.html".
@@ -123,62 +124,173 @@ function Import-GraphModuleSafely {
     }
 }
 
-# Function to get Service Principal owners
+# Enhanced function to get both Service Principal and App Registration owners
 function Get-ServicePrincipalOwners {
-    param([string]$ServicePrincipalId)
+    param(
+        [string]$ServicePrincipalId,
+        [string]$AppId
+    )
     
+    $allOwners = @{
+        ServicePrincipalOwners = @()
+        AppRegistrationOwners = @()
+        CombinedOwners = @()
+        HasServicePrincipalOwners = $false
+        HasAppRegistrationOwners = $false
+        HasAnyOwners = $false
+    }
+    
+    # Get Service Principal owners
     try {
-        $owners = Get-MgServicePrincipalOwner -ServicePrincipalId $ServicePrincipalId -All -ErrorAction SilentlyContinue
-        $ownerDetails = @()
+        $spOwners = Get-MgServicePrincipalOwner -ServicePrincipalId $ServicePrincipalId -All -ErrorAction SilentlyContinue
+        $spOwnerDetails = @()
         
-        foreach ($owner in $owners) {
+        foreach ($owner in $spOwners) {
             try {
                 # Try to get user details first
                 $user = Get-MgUser -UserId $owner.Id -ErrorAction SilentlyContinue
                 if ($user) {
-                    $ownerDetails += @{
+                    $spOwnerDetails += @{
                         Id = $owner.Id
                         DisplayName = $user.DisplayName
                         UserPrincipalName = $user.UserPrincipalName
                         Type = "User"
+                        Source = "ServicePrincipal"
                     }
                 } else {
                     # Try service principal if not a user
                     $sp = Get-MgServicePrincipal -ServicePrincipalId $owner.Id -ErrorAction SilentlyContinue
                     if ($sp) {
-                        $ownerDetails += @{
+                        $spOwnerDetails += @{
                             Id = $owner.Id
                             DisplayName = $sp.DisplayName
                             UserPrincipalName = $sp.AppId
                             Type = "ServicePrincipal"
+                            Source = "ServicePrincipal"
                         }
                     } else {
                         # Fallback for unknown owner type
-                        $ownerDetails += @{
+                        $spOwnerDetails += @{
                             Id = $owner.Id
                             DisplayName = "Unknown"
                             UserPrincipalName = ""
                             Type = "Unknown"
+                            Source = "ServicePrincipal"
                         }
                     }
                 }
             }
             catch {
-                $ownerDetails += @{
+                $spOwnerDetails += @{
                     Id = $owner.Id
                     DisplayName = "Unknown"
                     UserPrincipalName = ""
                     Type = "Unknown"
+                    Source = "ServicePrincipal"
                 }
             }
         }
         
-        return $ownerDetails
+        $allOwners.ServicePrincipalOwners = $spOwnerDetails
+        $allOwners.HasServicePrincipalOwners = $spOwnerDetails.Count -gt 0
     }
     catch {
-        return @()
+        # Service Principal owners retrieval failed
     }
+    
+    # Get App Registration owners (if app registration exists)
+    try {
+        $app = Get-MgApplication -Filter "appId eq '$AppId'" -ErrorAction SilentlyContinue
+        if ($app) {
+            $appOwners = Get-MgApplicationOwner -ApplicationId $app.Id -All -ErrorAction SilentlyContinue
+            $appOwnerDetails = @()
+            
+            foreach ($owner in $appOwners) {
+                try {
+                    # Try to get user details first
+                    $user = Get-MgUser -UserId $owner.Id -ErrorAction SilentlyContinue
+                    if ($user) {
+                        $appOwnerDetails += @{
+                            Id = $owner.Id
+                            DisplayName = $user.DisplayName
+                            UserPrincipalName = $user.UserPrincipalName
+                            Type = "User"
+                            Source = "AppRegistration"
+                        }
+                    } else {
+                        # Try service principal if not a user
+                        $sp = Get-MgServicePrincipal -ServicePrincipalId $owner.Id -ErrorAction SilentlyContinue
+                        if ($sp) {
+                            $appOwnerDetails += @{
+                                Id = $owner.Id
+                                DisplayName = $sp.DisplayName
+                                UserPrincipalName = $sp.AppId
+                                Type = "ServicePrincipal"
+                                Source = "AppRegistration"
+                            }
+                        } else {
+                            # Fallback for unknown owner type
+                            $appOwnerDetails += @{
+                                Id = $owner.Id
+                                DisplayName = "Unknown"
+                                UserPrincipalName = ""
+                                Type = "Unknown"
+                                Source = "AppRegistration"
+                            }
+                        }
+                    }
+                }
+                catch {
+                    $appOwnerDetails += @{
+                        Id = $owner.Id
+                        DisplayName = "Unknown"
+                        UserPrincipalName = ""
+                        Type = "Unknown"
+                        Source = "AppRegistration"
+                    }
+                }
+            }
+            
+            $allOwners.AppRegistrationOwners = $appOwnerDetails
+            $allOwners.HasAppRegistrationOwners = $appOwnerDetails.Count -gt 0
+        }
+    }
+    catch {
+        # App Registration owners retrieval failed
+    }
+    
+    # Combine unique owners from both sources
+    $uniqueOwnerIds = @{}
+    $combinedOwners = @()
+    
+    # Add Service Principal owners
+    foreach ($owner in $allOwners.ServicePrincipalOwners) {
+        if (-not $uniqueOwnerIds.ContainsKey($owner.Id)) {
+            $uniqueOwnerIds[$owner.Id] = $true
+            $combinedOwners += $owner
+        }
+    }
+    
+    # Add App Registration owners (if not already in the list)
+    foreach ($owner in $allOwners.AppRegistrationOwners) {
+        if (-not $uniqueOwnerIds.ContainsKey($owner.Id)) {
+            $uniqueOwnerIds[$owner.Id] = $true
+            $combinedOwners += $owner
+        } else {
+            # Update source to indicate owner is in both places
+            $existingOwner = $combinedOwners | Where-Object { $_.Id -eq $owner.Id }
+            if ($existingOwner -and $existingOwner.Source -eq "ServicePrincipal") {
+                $existingOwner.Source = "Both"
+            }
+        }
+    }
+    
+    $allOwners.CombinedOwners = $combinedOwners
+    $allOwners.HasAnyOwners = $combinedOwners.Count -gt 0
+    
+    return $allOwners
 }
+
 function Get-RiskScore {
     param(
         [array]$Permissions,
@@ -186,6 +298,10 @@ function Get-RiskScore {
         [string]$DisplayName,
         [bool]$HasCredentials,
         [bool]$HasAppRegistration,
+        [bool]$HasServicePrincipalOwners,
+        [bool]$HasAppRegistrationOwners,
+        [bool]$HasAnyOwners,
+        [bool]$AssignmentRequired,
         $TotalUsers
     )
     
@@ -219,7 +335,7 @@ function Get-RiskScore {
     # Application permissions bonus (only once, not per permission)
     if ($hasApplicationPerms) {
         $score += 5
-        $riskFactors += "Has application (daemon) permissions"
+        $riskFactors += "Has application permissions"
     }
     
     # Directory role scoring - only count unique roles
@@ -265,23 +381,31 @@ function Get-RiskScore {
         $score += 4
         $riskFactors += "No active credentials/certificates"
     }
-    
-    # Service Principal without App Registration (check once)
-    if (-not $HasAppRegistration) {
+        
+    # Enhanced ownership checks
+    if (-not $HasAnyOwners) {
+        $score += 5
+        $riskFactors += "No owners assigned (neither Service Principal nor App Registration)"
+    }
+    elseif (-not $HasServicePrincipalOwners -and $HasAppRegistration) {
+        $score += 3
+        $riskFactors += "No Service Principal owners (only App Registration owners)"
+    }
+    elseif (-not $HasAppRegistrationOwners -and $HasAppRegistration) {
         $score += 2
-        $riskFactors += "Service Principal without App Registration"
+        $riskFactors += "No App Registration owners (only Service Principal owners)"
     }
     
-    # No assigned owners (check once)
-    if (-not $HasOwners) {
-        $score += 3
-        $riskFactors += "No assigned owners - lack of governance"
+    # Ownership gap detection
+    if ($HasAppRegistration -and ($HasServicePrincipalOwners -ne $HasAppRegistrationOwners)) {
+        $score += 2
+        $riskFactors += "Ownership gap - owners differ between Service Principal and App Registration"
     }
     
     # Assignment not required (open access risk)
     if (-not $AssignmentRequired) {
         $score += 4
-        $riskFactors += "Assignment not required - open access to all users"
+        $riskFactors += "Assignment not required"
     }
     
     return @{
@@ -590,13 +714,13 @@ foreach ($sp in $servicePrincipals) {
         $totalUsers
     }
     
-    # Get Service Principal owners
-    $owners = Get-ServicePrincipalOwners -ServicePrincipalId $sp.Id
-    $hasOwners = $owners.Count -gt 0
+    # Get Service Principal and App Registration owners
+    $ownerInfo = Get-ServicePrincipalOwners -ServicePrincipalId $sp.Id -AppId $sp.AppId
+    $hasOwners = $ownerInfo.HasAnyOwners
     $assignmentRequired = $sp.AppRoleAssignmentRequired
     
-    # Calculate risk score (simplified - no activity data)
-    $riskAssessment = Get-RiskScore -Permissions $permissions -DirectoryRoles ($permissionInfo.RoleAssignments | ForEach-Object { @{Permission = $_.DisplayName} }) -DisplayName $sp.DisplayName -HasCredentials $credentials.HasActiveCredentials -HasAppRegistration $credentials.HasAppRegistration -HasOwners $hasOwners -AssignmentRequired $assignmentRequired -TotalUsers $totalUsersAffected
+    # Calculate risk score with enhanced ownership parameters
+    $riskAssessment = Get-RiskScore -Permissions $permissions -DirectoryRoles ($permissionInfo.RoleAssignments | ForEach-Object { @{Permission = $_.DisplayName} }) -DisplayName $sp.DisplayName -HasCredentials $credentials.HasActiveCredentials -HasAppRegistration $credentials.HasAppRegistration -HasServicePrincipalOwners $ownerInfo.HasServicePrincipalOwners -HasAppRegistrationOwners $ownerInfo.HasAppRegistrationOwners -HasAnyOwners $ownerInfo.HasAnyOwners -AssignmentRequired $assignmentRequired -TotalUsers $totalUsersAffected
     
     $report += [PSCustomObject]@{
         DisplayName = $sp.DisplayName
@@ -609,9 +733,14 @@ foreach ($sp in $servicePrincipals) {
         HasAppRegistration = $credentials.HasAppRegistration
         AppRegistrationId = $credentials.AppRegistrationId
         
-        # Ownership info
-        Owners = $owners
+        # Enhanced Ownership info
+        Owners = $ownerInfo.CombinedOwners
+        ServicePrincipalOwners = $ownerInfo.ServicePrincipalOwners
+        AppRegistrationOwners = $ownerInfo.AppRegistrationOwners
         HasOwners = $hasOwners
+        HasServicePrincipalOwners = $ownerInfo.HasServicePrincipalOwners
+        HasAppRegistrationOwners = $ownerInfo.HasAppRegistrationOwners
+        OwnershipGap = ($ownerInfo.HasServicePrincipalOwners -ne $ownerInfo.HasAppRegistrationOwners)
         AssignmentRequired = $assignmentRequired
         
         # Permissions
@@ -681,11 +810,14 @@ $tenantInfo = Get-MgOrganization | Select-Object -First 1
 $tenantName = $tenantInfo.DisplayName
 $tenantId = $tenantInfo.Id
 
-# Calculate additional statistics for internal vs external apps
+# Calculate additional statistics for internal vs external apps and ownership
 $internalApps = ($report | Where-Object { $_.AppOwnerOrganizationId -eq $tenantId }).Count
 $externalApps = ($report | Where-Object { $_.AppOwnerOrganizationId -ne $tenantId }).Count
 $appsWithoutOwners = ($report | Where-Object { $_.HasOwners -eq $false }).Count
 $appsWithOpenAccess = ($report | Where-Object { $_.AssignmentRequired -eq $false }).Count
+$appsWithOwnershipGaps = ($report | Where-Object { $_.OwnershipGap -eq $true }).Count
+$appsWithSPOwnersOnly = ($report | Where-Object { $_.HasServicePrincipalOwners -eq $true -and $_.HasAppRegistrationOwners -eq $false -and $_.HasAppRegistration -eq $true }).Count
+$appsWithAppRegOwnersOnly = ($report | Where-Object { $_.HasServicePrincipalOwners -eq $false -and $_.HasAppRegistrationOwners -eq $true }).Count
 
 # Generate simplified HTML report
 $html = @"
@@ -710,23 +842,24 @@ $html = @"
         th { background: #f7fafc; font-weight: 600; cursor: pointer; user-select: none; }
         th:hover { background: #edf2f7; }
         tr:hover { background: #f7fafc; }
-        .risk-critical { background: #fed7d7 !important; color: #c53030; font-weight: bold; }
-        .risk-high { background: #feebc8 !important; color: #dd6b20; font-weight: bold; }
+        .risk-critical { background: #fed7d7 !important; color: #c53030; }
+        .risk-high { background: #feebc8 !important; color: #dd6b20; }
         .risk-medium { background: #fefcbf !important; color: #d69e2e; }
         .risk-low { background: #c6f6d5 !important; color: #38a169; }
-        .has-app-reg { color: #38a169; font-weight: bold; }
-        .sp-only { color: #e53e3e; font-weight: bold; }
-        .internal-app { color: #2b6cb0; font-weight: bold; }
-        .external-app { color: #d69e2e; font-weight: bold; }
-        .assignment-required { color: #38a169; font-weight: bold; }
-        .assignment-not-required { color: #e53e3e; font-weight: bold; }
-        .has-owners { color: #38a169; font-weight: bold; }
-        .no-owners { color: #e53e3e; font-weight: bold; }
+        .has-app-reg { color: #38a169; }
+        .sp-only { color: #e53e3e; }
+        .internal-app { color: #2b6cb0; }
+        .external-app { color: #d69e2e; }
+        .assignment-required { color: #38a169; }
+        .assignment-not-required { color: #e53e3e; }
+        .has-owners { color: #38a169; }
+        .no-owners { color: #e53e3e; }
+        .ownership-gap { color: #d69e2e; }
         .permission-list { max-height: 200px; overflow-y: auto; font-size: 11px; }
         .permission-item { margin: 2px 0; padding: 2px 5px; background: #e2e8f0; border-radius: 3px; display: inline-block; margin-right: 5px; }
-        .app-permission { background: #fed7d7; color: #c53030; font-weight: bold; }
+        .app-permission { background: #fed7d7; color: #c53030; }
         .delegated-permission { background: #c6f6d5; color: #38a169; }
-        .directory-role { background: #feebc8; border-left: 3px solid #dd6b20; color: #dd6b20; font-weight: bold; }
+        .directory-role { background: #feebc8; border-left: 3px solid #dd6b20; color: #dd6b20; }
         .footer { margin-top: 30px; padding: 20px; text-align: center; color: #718096; background: white; border-radius: 10px; }
     </style>
 </head>
@@ -777,7 +910,7 @@ $html = @"
         <div class="summary-card">
             <h3>🔧 Application Permissions</h3>
             <div class="number">$totalApplicationPerms</div>
-            <div class="subtitle">High-risk daemon permissions ($appsWithApplicationPerms apps)</div>
+            <div class="subtitle">High-risk permissions ($appsWithApplicationPerms apps)</div>
         </div>
         <div class="summary-card">
             <h3>👤 Delegated Permissions</h3>
@@ -792,12 +925,17 @@ $html = @"
         <div class="summary-card">
             <h3>👤 Without Owners</h3>
             <div class="number">$appsWithoutOwners</div>
-            <div class="subtitle">Apps with no assigned owners (governance risk)</div>
+            <div class="subtitle">Apps with no assigned owners</div>
+        </div>
+        <div class="summary-card">
+            <h3>⚠️ Ownership Gaps</h3>
+            <div class="number">$appsWithOwnershipGaps</div>
+            <div class="subtitle">Apps with ownership inconsistencies</div>
         </div>
         <div class="summary-card">
             <h3>🌍 Open Access</h3>
             <div class="number">$appsWithOpenAccess</div>
-            <div class="subtitle">Apps with "Assignment Required" = No</div>
+            <div class="subtitle">Apps with no assignment required</div>
         </div>
     </div>
 
@@ -859,7 +997,7 @@ $sortedReport = $report | Sort-Object @{Expression="RiskScore"; Descending=$true
 foreach ($app in $sortedReport) {
     $riskClass = "risk-" + $app.RiskLevel.ToLower()
     $appRegClass = if ($app.HasAppRegistration) { "has-app-reg" } else { "sp-only" }
-    $appRegText = if ($app.HasAppRegistration) { "✅ Yes" } else { "❌ No" }
+    $appRegText = if ($app.HasAppRegistration) { "Yes" } else { "No" }
     
     # Determine app ownership
     $isInternal = $app.AppOwnerOrganizationId -eq $tenantId
@@ -870,20 +1008,46 @@ foreach ($app in $sortedReport) {
     $assignmentRequiredText = if ($app.AssignmentRequired) { "✅ Yes" } else { "❌ No" }
     $assignmentRequiredClass = if ($app.AssignmentRequired) { "assignment-required" } else { "assignment-not-required" }
     
-    # Format owners
+    # Format owners with enhanced information
     $ownersText = if ($app.HasOwners) {
+        $spOwnerCount = $app.ServicePrincipalOwners.Count
+        $appRegOwnerCount = $app.AppRegistrationOwners.Count
+        
+        # Build owner display
+        $ownerDisplay = "✅ Total: $($app.Owners.Count) owner(s)<br>"
+        
+        # Show breakdown if there's a difference
+        if ($app.OwnershipGap -or ($spOwnerCount -ne $appRegOwnerCount)) {
+            $ownerDisplay += "<small style='color: #e53e3e;'>⚠️ Ownership Gap Detected</small><br>"
+            $ownerDisplay += "<small style='color: #666;'>SP: $spOwnerCount | App Reg: $appRegOwnerCount</small><br>"
+        }
+        
+        # List all unique owners with their source
         $ownersList = ($app.Owners | ForEach-Object { 
+            $sourceIndicator = switch ($_.Source) {
+                "ServicePrincipal" { "[SP]" }
+                "AppRegistration" { "[App]" }
+                "Both" { "[Both]" }
+                default { "" }
+            }
             if ($_.Type -eq "User") { 
-                "$($_.DisplayName) ($($_.UserPrincipalName))" 
+                "$sourceIndicator $($_.DisplayName) ($($_.UserPrincipalName))" 
             } else { 
-                "$($_.DisplayName) [$($_.Type)]" 
+                "$sourceIndicator $($_.DisplayName) [$($_.Type)]" 
             }
         }) -join "<br>"
-        "✅ $($app.Owners.Count) owner(s)<br><small style='color: #666; font-size: 9px;'>$ownersList</small>"
+        
+        $ownerDisplay += "<small style='color: #666; font-size: 9px;'>$ownersList</small>"
+        $ownerDisplay
     } else {
         "❌ No owners assigned"
     }
-    $ownersClass = if ($app.HasOwners) { "has-owners" } else { "no-owners" }
+    
+    $ownersClass = if ($app.HasOwners) { 
+        if ($app.OwnershipGap) { "ownership-gap" } else { "has-owners" }
+    } else { 
+        "no-owners" 
+    }
     
     $credentialsInfo = ""
     $credentialStatus = ""
@@ -1039,13 +1203,15 @@ $html += @"
         <p>🌐 <strong>External Apps:</strong> Third-party applications integrated into your environment</p>
         <p>✅ <strong>With App Registration:</strong> Apps that have corresponding App Registration objects in your tenant</p>
         <p>❌ <strong>Service Principal Only:</strong> Apps with only Service Principal objects (gallery apps, legacy apps, etc.)</p>
-        <p>🔧 <strong>Application Permissions:</strong> High-risk daemon permissions that run with app identity</p>
+        <p>🔧 <strong>Application Permissions:</strong> High-risk permissions that run with app identity</p>
         <p>👤 <strong>Delegated Permissions:</strong> User-context permissions limited by user's actual access</p>
         <p>🔑 <strong>Active Credentials:</strong> Applications with valid secrets or certificates</p>
         <p>✅ <strong>Assignment Required = Yes:</strong> Only assigned users/groups can access (recommended for security)</p>
         <p>❌ <strong>Assignment Required = No:</strong> All users in tenant can potentially access (higher risk)</p>
         <p>✅ <strong>Has Owners:</strong> Application has assigned owners for governance</p>
         <p>❌ <strong>No Owners:</strong> Application lacks assigned owners (governance risk)</p>
+        <p>⚠️ <strong>Ownership Gap:</strong> Owners exist on Service Principal or App Registration but not both</p>
+        <p><strong>Owner Indicators:</strong> [SP] = Service Principal owner, [App] = App Registration owner, [Both] = Owner on both</p>
         <br>
         <p>Found this tool helpful? Subscribe to my blog at <a href="https://www.matej.guru" target="_blank" style="color: #00abeb; text-decoration: none;">www.matej.guru</a>.</p>
         <p style="margin-top: 10px; font-size: 0.8em; color: #95a5a6;">This script is provided "as is", without any warranty.</p>

@@ -82,13 +82,19 @@ param(
     [switch]$HTMLOnly
 )
 
-# Connect to Entra ID (Azure AD) with the required scope.
+# Scopes
+$scopes = @(
+    "User.Read.All",
+    "AuditLog.Read.All"
+)
+
+# Connect to Entra ID with the required scope.
 try {
     if ($TenantId) {
-        Connect-Entra -Scopes 'User.Read.All' -TenantId $TenantId
+        Connect-Entra -Scopes $scopes -TenantId $TenantId
         Write-Output "Successfully connected to Entra ID with specified tenant: $TenantId"
     } else {
-        Connect-Entra -Scopes 'User.Read.All'
+        Connect-Entra -Scopes $scopes
         Write-Output "Successfully connected to Entra ID with current user's tenant"
     }
 }
@@ -637,6 +643,9 @@ if ($generateHTML -and $generateCSV) {
     Write-Output ""
     Write-Output "CSV report generated: $csvPath"
 }
+
+# Disconnect from Microsoft Graph
+Disconnect-MgGraph
 
 # Create a summary file as well
 $summaryPath = Join-Path $ExportPath $summaryFileName

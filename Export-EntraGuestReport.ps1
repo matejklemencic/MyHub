@@ -8,7 +8,7 @@
     The script identifies inactive accounts, pending invitations, and users who never signed in to help with guest user lifecycle management.
 
 .AUTHOR
-    Matej Klemenčič
+    Matej Klemencic (www.matej.guru)
 
 .NOTES
     Version:        2.0
@@ -674,3 +674,4 @@ $(if ($generateHTML -and $generateCSV) { "HTML Report: $htmlPath`nCSV Report: $c
 "@ | Out-File -FilePath $summaryPath -Encoding UTF8
 
 Write-Output "Summary also saved to: $summaryPath"
+
